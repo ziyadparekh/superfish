@@ -60,6 +60,7 @@ func (rm *Application) routeMux() *mux.Router {
 	router.Handle("/", MustLogin(http.HandlerFunc(handlers.GetLogin))).Methods("GET")
 
 	router.HandleFunc("/signup", handlers.PostSignup).Methods("POST")
+	router.HandleFunc("/users/{id}", handlers.UpdateUser).Methods("PUT")
 
 	return router
 }

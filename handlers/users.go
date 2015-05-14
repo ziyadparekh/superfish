@@ -3,6 +3,7 @@ package handlers
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io/ioutil"
 	"net/http"
 
@@ -109,4 +110,69 @@ func PostLogin(w http.ResponseWriter, r *http.Request) {
 	w.Write(uj)
 
 	return
+}
+
+func UpdateUser(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	userId, err := getIdFromPath(w, r)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+	}
+
+	db := context.Get(r, "db").(*mgo.Session)
+	cookieStore := context.Get(r, "cookieStore").(*sessions.CookieStore)
+	session, _ := cookieStore.Get(r, "superfish-session")
+
+	currentUser := session.Values["user"].(*dal.UserModel)
+
+	if currentUser.Id != userId {
+		err := errors.New("Modifying other user is not allowed")
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	s := Signup{}
+	decoder := json.NewDecoder(r.Body)
+	u_err := decoder.Decode(&s)
+	if u_err != nil {
+		libhttp.HandleErrorJson(w, u_err)
+		return
+	}
+
+	u := dal.NewUser(db)
+
+	if s.Password != "" {
+		if err = u.UpdatePasswordById(currentUser.Id, s.Password); err != nil {
+			libhttp.HandleErrorJson(w, err)
+			return
+		}
+	}
+
+	if s.Number != "" {
+		if err = u.UpdateNumberById(currentUser.Id, s.Number); err != nil {
+			libhttp.HandleErrorJson(w, err)
+			return
+		}
+	}
+
+	currentUser, err = u.GetById(userId)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	session.Values["user"] = currentUser
+	err = session.Save(r, w)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	uj, _ := json.Marshal(currentUser)
+	w.WriteHeader(http.StatusOK)
+	w.Write(uj)
+
+	return
+
 }
