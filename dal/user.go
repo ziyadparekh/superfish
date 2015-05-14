@@ -2,6 +2,7 @@ package dal
 
 import (
 	"errors"
+	"regexp"
 
 	"github.com/Sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -30,7 +31,10 @@ func NewUser(db *mgo.Session) *User {
 }
 
 func (u *User) Signup(number, username, password string) error {
-	if number == "" {
+
+	reg := regexp.MustCompile(`^(\([0-9]{3}\)|[0-9]{3})[0-9]{3}[0-9]{4}$`)
+
+	if number == "" || !reg.MatchString(number) {
 		return errors.New("Number cannot be blank")
 	}
 	if password == "" {
@@ -98,7 +102,9 @@ func (u *User) GetUserByUsernameAndPassword(username, password string) (*UserMod
 }
 
 func (u *User) UpdateNumberById(userId bson.ObjectId, number string) error {
-	if number == "" {
+	reg := regexp.MustCompile(`^(\([0-9]{3}\)|[0-9]{3})[0-9]{3}[0-9]{4}$`)
+
+	if number == "" || !reg.MatchString(number) {
 		return errors.New("Number cannot be blank")
 	}
 
