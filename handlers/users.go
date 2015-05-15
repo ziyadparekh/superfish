@@ -30,6 +30,29 @@ func (m copyReader) Close() error {
 	return nil
 }
 
+func GetUsersRooms(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if !isUserLoggedIn(w, r) {
+		notAllowed := errors.New("You need to be logged in to perform this action")
+		libhttp.HandleErrorJson(w, notAllowed)
+		return
+	}
+	user := getCurrentUser(w, r)
+
+	db := context.Get(r, "db").(*mgo.Session)
+	rm := dal.NewRoom(db)
+	rooms, err := rm.GetRoomsForUsername(user.Username)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	rooms_j, _ := json.Marshal(rooms)
+	w.WriteHeader(http.StatusOK)
+	w.Write(rooms_j)
+	return
+}
+
 func GetLogin(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 

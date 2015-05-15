@@ -61,8 +61,10 @@ func (rm *Application) routeMux() *mux.Router {
 
 	router.HandleFunc("/signup", handlers.PostSignup).Methods("POST")
 	router.HandleFunc("/users/{id}", handlers.UpdateUser).Methods("PUT")
+	router.HandleFunc("/users/rooms", handlers.GetUsersRooms).Methods("GET")
 
 	router.HandleFunc("/room", handlers.PostRoomCreate).Methods("POST")
+	router.HandleFunc("/room/{id}", handlers.GetRoomById).Methods("GET")
 	router.HandleFunc("/room/{id}/name", handlers.UpdateRoomName).Methods("PUT")
 	router.HandleFunc("/room/{id}/members", handlers.UpdateRoomMembers).Methods("PUT")
 

@@ -75,3 +75,14 @@ func (r *Room) UpdateRoomNameById(roomId bson.ObjectId, name string) error {
 	}
 	return nil
 }
+
+func (r *Room) GetRoomsForUsername(username string) (*[]RoomModel, error) {
+	usernames := [1]string{username}
+	rooms := make([]RoomModel, 0)
+
+	c := r.db.DB("superfish").C(r.collection)
+	query := bson.M{"members": bson.M{"$all": usernames}}
+	err := c.Find(query).All(&rooms)
+
+	return &rooms, err
+}

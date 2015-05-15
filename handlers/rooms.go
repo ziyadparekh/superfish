@@ -53,6 +53,43 @@ func PostRoomCreate(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+func GetRoomById(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if !isUserLoggedIn(w, r) {
+		notAllowed := errors.New("You need to be logged in to perform this action")
+		libhttp.HandleErrorJson(w, notAllowed)
+		return
+	}
+
+	rid, err := getIdFromPath(w, r)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	currentUser := getCurrentUser(w, r)
+	db := context.Get(r, "db").(*mgo.Session)
+
+	r_db := dal.NewRoom(db)
+	room, err := r_db.GetRoomById(rid)
+	if err != nil {
+		libhttp.HandleErrorJson(w, err)
+		return
+	}
+
+	if !isUserInRoom(currentUser.Username, room.Members) {
+		notMember := errors.New("You need to be a member of the group to make updates")
+		libhttp.HandleErrorJson(w, notMember)
+		return
+	}
+
+	rj, _ := json.Marshal(room)
+	w.WriteHeader(http.StatusOK)
+	w.Write(rj)
+	return
+}
+
 func UpdateRoomMembers(w http.ResponseWriter, r *http.Request) {
 	db := context.Get(r, "db").(*mgo.Session)
 	r_db := dal.NewRoom(db)
