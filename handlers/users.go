@@ -118,6 +118,7 @@ func UpdateUser(w http.ResponseWriter, r *http.Request) {
 	userId, err := getIdFromPath(w, r)
 	if err != nil {
 		libhttp.HandleErrorJson(w, err)
+		return
 	}
 
 	db := context.Get(r, "db").(*mgo.Session)

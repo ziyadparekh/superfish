@@ -62,6 +62,10 @@ func (rm *Application) routeMux() *mux.Router {
 	router.HandleFunc("/signup", handlers.PostSignup).Methods("POST")
 	router.HandleFunc("/users/{id}", handlers.UpdateUser).Methods("PUT")
 
+	router.HandleFunc("/room", handlers.PostRoomCreate).Methods("POST")
+	router.HandleFunc("/room/{id}/name", handlers.UpdateRoomName).Methods("PUT")
+	router.HandleFunc("/room/{id}/members", handlers.UpdateRoomMembers).Methods("PUT")
+
 	return router
 }
 

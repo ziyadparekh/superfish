@@ -17,6 +17,17 @@ func getCurrentUser(w http.ResponseWriter, r *http.Request) *dal.UserModel {
 	return session.Values["user"].(*dal.UserModel)
 }
 
+func isUserLoggedIn(w http.ResponseWriter, r *http.Request) bool {
+	cookieStore := context.Get(r, "cookieStore").(*sessions.CookieStore)
+	session, _ := cookieStore.Get(r, "superfish-session")
+	userRowInterface := session.Values["user"]
+
+	if userRowInterface == nil {
+		return false
+	}
+	return true
+}
+
 func getIdFromPath(w http.ResponseWriter, r *http.Request) (bson.ObjectId, error) {
 	userIdString := mux.Vars(r)["id"]
 	if userIdString == "" {
