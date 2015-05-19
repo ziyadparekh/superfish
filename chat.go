@@ -30,20 +30,22 @@ var ErrClientExists = errors.New("clientdata: Client already exists")
 var ErrUsernameInvalid = errors.New("Error registering user: Invalid username")
 var ErrPasswordInvalid = errors.New("Error registering user: Invalid password")
 var ErrNumberInvalid = errors.New("Error registering user: Invalid number")
+var ErrGroupNameInvalid = errors.New("Error creating new group: Group name must be alphanumeric")
+var ErrUnauthorizedAccess = errors.New("Unauthorized access")
 
 type User struct {
-	Id       bson.ObjectId `json:"id" mgo:"_id"`
-	Username string        `json:"username" mgo:"username"`
-	Number   string        `json:"number" mgo:"number"`
-	Token    string        `json:"token" mgo:"token"`
-	Password string        `json:"password" mgo:"password"`
+	Id       bson.ObjectId `json:"id" bson:"_id"`
+	Username string        `json:"username" bson:"username"`
+	Number   string        `json:"number" bson:"number"`
+	Token    string        `json:"token" bson:"token"`
+	Password string        `json:"password" bson:"password"`
 }
 
 type Group struct {
-	Id       bson.ObjectId `json:"id" mgo:"_id"`
-	Name     string        `json:"name" mgo:"name"`
-	Members  []*User       `json:"members" mgo:"members"`
-	Messages []*Message    `json:"messages" mgo:"messages"`
+	Id       bson.ObjectId `json:"id" bson:"_id"`
+	Name     string        `json:"name" bson:"name"`
+	Members  []User        `json:"members" bson:"members"`
+	Messages []Message     `json:"messages" bson:"messages"`
 }
 
 type GroupPost struct {
@@ -52,9 +54,9 @@ type GroupPost struct {
 }
 
 type Message struct {
-	Content string    `json:"content" mgo:content`
-	Action  int       `json:"action" mgo:action`
-	Time    time.Time `json:"time" mgo:"time"`
+	Content string    `json:"content" bson:content`
+	Action  int       `json:"action" bson:action`
+	Time    time.Time `json:"time" bson:"time"`
 }
 
 type Base struct {
@@ -65,6 +67,62 @@ type Base struct {
 
 type UserDataClient struct {
 	Base
+}
+
+type GroupDataClient struct {
+	Base
+}
+
+func NewGroupClient(db *mgo.Session) *GroupDataClient {
+	g := new(GroupDataClient)
+	g.db = db
+	g.collection = "groups"
+	g.dbName = "superfish"
+	return g
+}
+
+func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (*Group, error) {
+	group := new(Group)
+	users, err := g.CreateMembersArray(data.Members)
+	exists := IsItemInArray(users, curr_user.Username)
+	group.Name = data.Name
+	group.Id = bson.NewObjectId()
+	group.Messages = g.NewMessagesList()
+	if exists {
+		group.Members = *users
+	} else {
+		group.Members = append(*users, *curr_user)
+	}
+	return group, err
+}
+
+func IsItemInArray(members *[]User, name string) bool {
+	exists := false
+	for _, v := range *members {
+		if v.Username == name {
+			exists = true
+		}
+	}
+	return exists
+}
+
+func (g *GroupDataClient) NewMessagesList() []Message {
+	msg := make([]Message, 0)
+	return msg
+}
+
+func (g *GroupDataClient) CreateMembersArray(members []string) (*[]User, error) {
+	users := make([]User, 1)
+	c := g.db.DB(g.dbName).C("users")
+	query := bson.M{"username": bson.M{"$in": members}}
+	err := c.Find(query).All(&users)
+	return &users, err
+}
+
+func (g *GroupDataClient) NewGroup(group *Group) error {
+	c := g.db.DB(g.dbName).C(g.collection)
+	err := c.Insert(group)
+	return err
 }
 
 func NewUserData(db *mgo.Session) *UserDataClient {
@@ -80,6 +138,17 @@ func (u *UserDataClient) GetByUsername(username string) (*User, error) {
 	c := u.db.DB(u.dbName).C(u.collection)
 	err := c.Find(bson.M{"username": username}).One(user)
 	return user, err
+}
+
+func (u *UserDataClient) GetById(id string) (*User, error) {
+	user := new(User)
+	userID, err := ParseIdFromString(id)
+	if err != nil {
+		return nil, err
+	}
+	c := u.db.DB(u.dbName).C(u.collection)
+	err2 := c.FindId(userID).One(user)
+	return user, err2
 }
 
 func (u *UserDataClient) CreateNewUser(user *User) error {
@@ -116,49 +185,43 @@ func CreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	group_post := new(GroupPost)
-	group := new(Group)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(group_post); err != nil {
 		ServerError(w, err)
+		return
 	}
-	if group_post.Name == "" {
-		group.Name = "Group"
+	if !ValidateName(group_post.Name) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(ErrGroupNameInvalid.Error()))
+		return
 	}
-	users, err := createMembersArray(group_post.Members)
-	if err != nil {
+	db := GetMongoSession(r)
+	g := NewGroupClient(db)
+	group, err := g.FormatGroupContent(group_post, curr_user)
+	if err := g.NewGroup(group); err != nil {
 		ServerError(w, err)
 	}
-	group.Messages = make([]*Message, 0)
-	group.Members = users
-	users = append(group.Members, curr_user)
-	group.Id = bson.NewObjectId()
-	// TODO:: save group to database
 	gj, _ := json.Marshal(group)
 	w.WriteHeader(http.StatusOK)
 	w.Write(gj)
 }
 
 func currentUser(w http.ResponseWriter, r *http.Request) (*User, error) {
-	if existsToken(r) {
-		_, token := parseToken(r)
-		user := new(User) //TODO:: Fetch user from database
-		if user.Token == token {
-			return user, nil
-		}
-		return nil, errors.New("User is not logged in")
+	if !existsToken(r) {
+		return nil, ErrUnauthorizedAccess
 	}
-	return nil, errors.New("User is not logged in")
-}
-
-func createMembersArray(members []string) ([]*User, error) {
-	users := make([]*User, 0)
-	for _, u := range members {
-		// TODO:: fetch users from db
-		utemp := new(User)
-		utemp.Username = u
-		users = append(users, utemp)
+	db := GetMongoSession(r)
+	us := NewUserData(db)
+	userId, token := parseToken(r)
+	user, err := us.GetById(userId)
+	if err != nil {
+		return nil, err
 	}
-	return users, nil
+	parts := strings.Split(user.Token, "+")
+	if parts[1] == token {
+		return user, nil
+	}
+	return nil, ErrUnauthorizedAccess
 }
 
 func Register(w http.ResponseWriter, r *http.Request) {
@@ -231,6 +294,13 @@ func ValidateNumber(number string) bool {
 	return true
 }
 
+func ParseIdFromString(stringID string) (bson.ObjectId, error) {
+	if stringID == "" || !bson.IsObjectIdHex(stringID) {
+		return "", errors.New("User id is malformed")
+	}
+	return bson.ObjectIdHex(stringID), nil
+}
+
 //ServerError handles server errors writing a response to the client and logging the error.
 func ServerError(w http.ResponseWriter, err error) {
 	log.Println(err)
@@ -252,7 +322,7 @@ func parseToken(rq *http.Request) (u, t string) {
 	if token == "" {
 		return "", ""
 	}
-	parts := strings.Split(token, "_")
+	parts := strings.Split(token, "+")
 	if len(parts) == 2 {
 		return parts[0], parts[1]
 	} else {
@@ -265,7 +335,7 @@ func generateUserToken(u *User) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	userToken := u.Id.Hex() + "_" + token
+	userToken := u.Id.Hex() + "+" + token
 	return userToken, nil
 }
 
