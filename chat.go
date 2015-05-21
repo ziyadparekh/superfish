@@ -60,7 +60,8 @@ type Group struct {
 }
 
 type RealTimeGroup struct {
-	Group      *Group                 `json:"group"`
+	Group      *Group `json:"group"`
+	DataClient *GroupDataClient
 	Users      map[*RealTimeUser]bool `json:"-"`
 	Broadcast  chan []byte            `json:"-"`
 	Register   chan *RealTimeUser     `json:"-"`
@@ -69,8 +70,11 @@ type RealTimeGroup struct {
 }
 
 type RealTimeMessage struct {
-	Sender  string `json:"sender"`
-	Content []byte `json:"content"`
+	Sender  string    `json:"sender"`
+	Content string    `json:"content"`
+	Time    time.Time `json:"time"`
+	Type    string    `json:"type"`
+	Group   string    `json:"group"`
 }
 
 type GroupPost struct {
@@ -125,7 +129,7 @@ loop:
 					json.Unmarshal(m, msg)
 					if msg.Sender != user.User.Username {
 						select {
-						case user.SendQueue <- msg.Content:
+						case user.SendQueue <- []byte(msg.Content):
 						default:
 							close(user.SendQueue)
 							delete(rt_group.Users, user)
@@ -144,7 +148,16 @@ loop:
 func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage, u *RealTimeUser) {
 	if len(rt_group.Users) > 0 {
 		rt_group.Broadcast <- PrepareMessage(message)
+		if err := rt_group.AddMessageToDatabase(message); err != nil {
+			log.Println(err)
+		}
 	}
+}
+
+func (rt_group *RealTimeGroup) AddMessageToDatabase(message *RealTimeMessage) error {
+	C := rt_group.DataClient.db.DB(rt_group.DataClient.dbName).C("messages")
+	err := C.Insert(message)
+	return err
 }
 
 func (rt_user *RealTimeUser) Write(mt int, payload []byte) error {
@@ -186,9 +199,13 @@ func (rt_user *RealTimeUser) Listen() {
 }
 
 func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
-	msg := new(RealTimeMessage)
-	msg.Content = message
-	msg.Sender = rt_user.User.Username
+	msg := &RealTimeMessage{
+		Content: string(message[:]),
+		Sender:  rt_user.User.Username,
+		Group:   rt_user.GroupId,
+		Type:    "Text",
+		Time:    time.Now(),
+	}
 	if len(msg.Content) == 0 {
 		return
 	}
@@ -430,7 +447,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 
 	rt_group, exists := ActiveGroups[groupId.Hex()]
 	if !exists {
-		rt_group = InitializeRTGroup(group)
+		rt_group = InitializeRTGroup(group, gr)
 	}
 
 	rt_user := &RealTimeUser{
@@ -447,9 +464,10 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	rt_user.Listen()
 }
 
-func InitializeRTGroup(g *Group) *RealTimeGroup {
+func InitializeRTGroup(g *Group, gr *GroupDataClient) *RealTimeGroup {
 	rt_group := &RealTimeGroup{
 		Group:      g,
+		DataClient: gr,
 		Broadcast:  make(chan []byte),
 		Register:   make(chan *RealTimeUser),
 		Unregister: make(chan *RealTimeUser),
