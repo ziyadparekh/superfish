@@ -214,6 +214,18 @@ func NewGroupClient(db *mgo.Session) *GroupDataClient {
 	return g
 }
 
+func (gr *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User) (bool, *Group) {
+	group, err := gr.FindGroupById(id)
+	if err != nil {
+		log.Println(err)
+		return false, nil
+	}
+	if IsItemInArray(&group.Members, u.Username) {
+		return true, group
+	}
+	return false, nil
+}
+
 func (g *GroupDataClient) FindGroupById(id bson.ObjectId) (*Group, error) {
 	group := new(Group)
 	groupID, err := ParseIdFromString(id.Hex())
@@ -238,16 +250,6 @@ func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (
 		group.Members = append(*users, *curr_user)
 	}
 	return group, err
-}
-
-func IsItemInArray(members *[]User, name string) bool {
-	exists := false
-	for _, v := range *members {
-		if v.Username == name {
-			exists = true
-		}
-	}
-	return exists
 }
 
 func (g *GroupDataClient) NewMessagesList() []Message {
@@ -414,13 +416,9 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-	group, err := gr.FindGroupById(groupId)
-	if !IsItemInArray(&group.Members, curr_user.Username) {
+	exists, group := gr.IsUserInGroup(groupId, curr_user)
+	if !exists {
 		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	if err != nil {
-		ServerError(w, err)
 		return
 	}
 
@@ -463,6 +461,16 @@ func InitializeRTGroup(g *Group) *RealTimeGroup {
 	ActiveGroups[rt_group.Group.Id.Hex()] = rt_group
 
 	return rt_group
+}
+
+func IsItemInArray(members *[]User, name string) bool {
+	exists := false
+	for _, v := range *members {
+		if v.Username == name {
+			exists = true
+		}
+	}
+	return exists
 }
 
 func GetIdFromPath(r *http.Request, param string) (bson.ObjectId, error) {
