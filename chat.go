@@ -60,8 +60,8 @@ type Group struct {
 }
 
 type RealTimeGroup struct {
-	Group      *Group `json:"group"`
-	DataClient *GroupDataClient
+	Group      *Group                 `json:"group"`
+	DataClient *GroupDataClient       `json:"-"`
 	Users      map[*RealTimeUser]bool `json:"-"`
 	Broadcast  chan []byte            `json:"-"`
 	Register   chan *RealTimeUser     `json:"-"`
