@@ -68,6 +68,11 @@ type RealTimeGroup struct {
 	Stop       chan int               `json:"-"`
 }
 
+type RealTimeMessage struct {
+	Sender  string `json:"sender"`
+	Content []byte `json:"content"`
+}
+
 type GroupPost struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
@@ -116,11 +121,15 @@ loop:
 		case m, ok := <-rt_group.Broadcast:
 			if ok {
 				for user := range rt_group.Users {
-					select {
-					case user.SendQueue <- m:
-					default:
-						close(user.SendQueue)
-						delete(rt_group.Users, user)
+					msg := new(RealTimeMessage)
+					json.Unmarshal(m, msg)
+					if msg.Sender != user.User.Username {
+						select {
+						case user.SendQueue <- msg.Content:
+						default:
+							close(user.SendQueue)
+							delete(rt_group.Users, user)
+						}
 					}
 				}
 			} else {
@@ -132,9 +141,9 @@ loop:
 	}
 }
 
-func (rt_group *RealTimeGroup) Announce(message string) {
+func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage, u *RealTimeUser) {
 	if len(rt_group.Users) > 0 {
-		rt_group.Broadcast <- []byte(message)
+		rt_group.Broadcast <- PrepareMessage(message)
 	}
 }
 
@@ -177,14 +186,24 @@ func (rt_user *RealTimeUser) Listen() {
 }
 
 func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
-	msg := string(message[:])
-	if msg == "" || len(msg) == 0 {
+	msg := new(RealTimeMessage)
+	msg.Content = message
+	msg.Sender = rt_user.User.Username
+	if len(msg.Content) == 0 {
 		return
 	}
 	now := time.Now()
 	rt_user.LastActivity = now
 	room := ActiveGroups[rt_user.GroupId]
-	room.Announce(msg)
+	room.Announce(msg, rt_user)
+}
+
+func PrepareMessage(content interface{}) []byte {
+	resp, err := json.Marshal(content)
+	if err == nil {
+		return resp
+	}
+	return []byte("")
 }
 
 func NewGroupClient(db *mgo.Session) *GroupDataClient {
@@ -411,7 +430,10 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rt_group := InitializeRTGroup(group)
+	rt_group, exists := ActiveGroups[groupId.Hex()]
+	if !exists {
+		rt_group = InitializeRTGroup(group)
+	}
 
 	rt_user := &RealTimeUser{
 		User:         curr_user,
