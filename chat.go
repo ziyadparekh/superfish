@@ -252,10 +252,9 @@ func (g *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
 
 	for i, gr := range groups {
 		msg, err := g.GetLastMessageForGroup(gr.Id)
-		if err != nil {
-			log.Println(err)
+		if err != mgo.ErrNotFound {
+			groups[i].Messages = append(groups[i].Messages, *msg)
 		}
-		groups[i].Messages = append(groups[i].Messages, *msg)
 	}
 	return &groups, err
 }
@@ -277,9 +276,8 @@ func (g *GroupDataClient) FindGroupById(id bson.ObjectId, full bool) (*Group, er
 	err2 := c.FindId(groupID).One(group)
 	if full {
 		messages, err := g.GetAllMessagesForGroup(groupID)
-		group.Messages = *messages
-		if err != nil {
-			log.Println(err)
+		if err != mgo.ErrNotFound {
+			group.Messages = *messages
 		}
 	}
 	return group, err2
