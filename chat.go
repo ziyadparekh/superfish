@@ -53,10 +53,10 @@ type RealTimeUser struct {
 }
 
 type Group struct {
-	Id       bson.ObjectId `json:"id" bson:"_id"`
-	Name     string        `json:"name" bson:"name"`
-	Members  []User        `json:"members" bson:"members"`
-	Messages []Message     `json:"messages" bson:"messages"`
+	Id       bson.ObjectId     `json:"id" bson:"_id"`
+	Name     string            `json:"name" bson:"name"`
+	Members  []User            `json:"members" bson:"members"`
+	Messages []RealTimeMessage `json:"messages" bson:"messages"`
 }
 
 type RealTimeGroup struct {
@@ -231,8 +231,8 @@ func NewGroupClient(db *mgo.Session) *GroupDataClient {
 	return g
 }
 
-func (gr *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User) (bool, *Group) {
-	group, err := gr.FindGroupById(id)
+func (g *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User, full bool) (bool, *Group) {
+	group, err := g.FindGroupById(id, full)
 	if err != nil {
 		log.Println(err)
 		return false, nil
@@ -243,17 +243,31 @@ func (gr *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User) (bool, *Grou
 	return false, nil
 }
 
-func (gr *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
+func (g *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
 	username := [1]*User{user}
 	groups := make([]Group, 0)
 	query := bson.M{"members": bson.M{"$all": username}}
-	c := gr.db.DB(gr.dbName).C(gr.collection)
+	c := g.db.DB(g.dbName).C(g.collection)
 	err := c.Find(query).All(&groups)
 
+	for i, gr := range groups {
+		msg, err := g.GetLastMessageForGroup(gr.Id)
+		if err != nil {
+			log.Println(err)
+		}
+		groups[i].Messages = append(groups[i].Messages, *msg)
+	}
 	return &groups, err
 }
 
-func (g *GroupDataClient) FindGroupById(id bson.ObjectId) (*Group, error) {
+func (g *GroupDataClient) GetLastMessageForGroup(gid bson.ObjectId) (*RealTimeMessage, error) {
+	message := new(RealTimeMessage)
+	c := g.db.DB(g.dbName).C("messages")
+	err := c.Find(bson.M{"group": gid.Hex()}).Sort("-time").One(message)
+	return message, err
+}
+
+func (g *GroupDataClient) FindGroupById(id bson.ObjectId, full bool) (*Group, error) {
 	group := new(Group)
 	groupID, err := ParseIdFromString(id.Hex())
 	if err != nil {
@@ -261,7 +275,21 @@ func (g *GroupDataClient) FindGroupById(id bson.ObjectId) (*Group, error) {
 	}
 	c := g.db.DB(g.dbName).C(g.collection)
 	err2 := c.FindId(groupID).One(group)
+	if full {
+		messages, err := g.GetAllMessagesForGroup(groupID)
+		group.Messages = *messages
+		if err != nil {
+			log.Println(err)
+		}
+	}
 	return group, err2
+}
+
+func (g *GroupDataClient) GetAllMessagesForGroup(gid bson.ObjectId) (*[]RealTimeMessage, error) {
+	messages := make([]RealTimeMessage, 0)
+	c := g.db.DB(g.dbName).C("messages")
+	err := c.Find(bson.M{"group": gid.Hex()}).Sort("-time").All(&messages)
+	return &messages, err
 }
 
 func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (*Group, error) {
@@ -279,8 +307,8 @@ func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (
 	return group, err
 }
 
-func (g *GroupDataClient) NewMessagesList() []Message {
-	msg := make([]Message, 0)
+func (g *GroupDataClient) NewMessagesList() []RealTimeMessage {
+	msg := make([]RealTimeMessage, 0)
 	return msg
 }
 
@@ -365,6 +393,30 @@ func GetGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gj, _ := json.Marshal(groups)
+	w.WriteHeader(http.StatusOK)
+	w.Write(gj)
+}
+
+func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
+	curr_user, err := currentUser(w, r)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	group_id, err := GetIdFromPath(r, "group_id")
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	gr := NewGroupClient(db)
+
+	exists, group := gr.IsUserInGroup(group_id, curr_user, true)
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	gj, _ := json.Marshal(group)
 	w.WriteHeader(http.StatusOK)
 	w.Write(gj)
 }
@@ -461,7 +513,7 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-	exists, group := gr.IsUserInGroup(groupId, curr_user)
+	exists, group := gr.IsUserInGroup(groupId, curr_user, false)
 	if !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -676,7 +728,8 @@ func routeMux() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/signup", Register).Methods("POST")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
-	router.HandleFunc("/group/all", GetGroups).Methods("GET")
+	router.HandleFunc("/group/{group_id}", GetSingleGroup).Methods("GET")
+	router.HandleFunc("/groups", GetGroups).Methods("GET")
 	router.HandleFunc("/ws/{group_id}", WebsocketHandler).Methods("GET")
 	return router
 }
