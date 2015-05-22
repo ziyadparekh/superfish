@@ -243,6 +243,16 @@ func (gr *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User) (bool, *Grou
 	return false, nil
 }
 
+func (gr *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
+	username := [1]*User{user}
+	groups := make([]Group, 0)
+	query := bson.M{"members": bson.M{"$all": username}}
+	c := gr.db.DB(gr.dbName).C(gr.collection)
+	err := c.Find(query).All(&groups)
+
+	return &groups, err
+}
+
 func (g *GroupDataClient) FindGroupById(id bson.ObjectId) (*Group, error) {
 	group := new(Group)
 	groupID, err := ParseIdFromString(id.Hex())
@@ -339,6 +349,24 @@ func (u *UserDataClient) NewUser(user *User) error {
 		return err
 	}
 	return nil
+}
+
+func GetGroups(w http.ResponseWriter, r *http.Request) {
+	curr_user, err := currentUser(w, r)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	gr := NewGroupClient(db)
+	groups, err := gr.GetGroupsForUser(curr_user)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	gj, _ := json.Marshal(groups)
+	w.WriteHeader(http.StatusOK)
+	w.Write(gj)
 }
 
 func CreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -502,7 +530,7 @@ func GetIdFromPath(r *http.Request, param string) (bson.ObjectId, error) {
 }
 
 func ValidateUser(u *User) error {
-	if !ValidateName(u.Username) {
+	if !ValidateName(u.Username) || len(u.Username) == 0 {
 		return ErrUsernameInvalid
 	}
 	if !ValidatePassword(u.Password) {
@@ -648,6 +676,7 @@ func routeMux() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/signup", Register).Methods("POST")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
+	router.HandleFunc("/group/all", GetGroups).Methods("GET")
 	router.HandleFunc("/ws/{group_id}", WebsocketHandler).Methods("GET")
 	return router
 }
