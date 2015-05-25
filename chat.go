@@ -55,6 +55,7 @@ type RealTimeUser struct {
 type Group struct {
 	Id       bson.ObjectId     `json:"id" bson:"_id"`
 	Name     string            `json:"name" bson:"name"`
+	Activity time.Time         `json:"activity" bson:"activity"`
 	Members  []User            `json:"members" bson:"members"`
 	Messages []RealTimeMessage `json:"messages" bson:"messages"`
 }
@@ -80,6 +81,11 @@ type RealTimeMessage struct {
 type GroupPost struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
+}
+
+type Pagination struct {
+	Limit  int `json:"limit"`
+	Offset int `json:"offset"`
 }
 
 type Message struct {
@@ -148,16 +154,32 @@ loop:
 func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage, u *RealTimeUser) {
 	if len(rt_group.Users) > 0 {
 		rt_group.Broadcast <- PrepareMessage(message)
-		if err := rt_group.AddMessageToDatabase(message); err != nil {
+		if err := rt_group.DataClient.AddMessageToDatabase(message); err != nil {
+			log.Println(err)
+		}
+		if err := rt_group.DataClient.UpdateGroupActivity(rt_group.Group.Id.Hex()); err != nil {
 			log.Println(err)
 		}
 	}
 }
 
-func (rt_group *RealTimeGroup) AddMessageToDatabase(message *RealTimeMessage) error {
-	C := rt_group.DataClient.db.DB(rt_group.DataClient.dbName).C("messages")
+func (g *GroupDataClient) AddMessageToDatabase(message *RealTimeMessage) error {
+	C := g.db.DB(g.dbName).C("messages")
 	err := C.Insert(message)
 	return err
+}
+
+func (g *GroupDataClient) UpdateGroupActivity(id string) error {
+	groupId, err := ParseIdFromString(id)
+	if err != nil {
+		return err
+	}
+	c := g.db.DB(g.dbName).C(g.collection)
+	query := bson.M{"$set": bson.M{"activity": time.Now()}}
+	if err := c.Update(bson.M{"_id": groupId}, query); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (rt_user *RealTimeUser) Write(mt int, payload []byte) error {
@@ -248,7 +270,7 @@ func (g *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
 	groups := make([]Group, 0)
 	query := bson.M{"members": bson.M{"$all": username}}
 	c := g.db.DB(g.dbName).C(g.collection)
-	err := c.Find(query).All(&groups)
+	err := c.Find(query).Sort("-activity").All(&groups)
 
 	for i, gr := range groups {
 		msg, err := g.GetLastMessageForGroup(gr.Id)
@@ -295,6 +317,7 @@ func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (
 	users, err := g.CreateMembersArray(data.Members)
 	exists := IsItemInArray(users, curr_user.Username)
 	group.Name = data.Name
+	group.Activity = time.Now()
 	group.Id = bson.NewObjectId()
 	group.Messages = g.NewMessagesList()
 	if exists {
@@ -375,6 +398,33 @@ func (u *UserDataClient) NewUser(user *User) error {
 		return err
 	}
 	return nil
+}
+
+func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
+	curr_user, err := currentUser(w, r)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	group_id, err := GetIdFromPath(r, "group_id")
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	gr := NewGroupClient(db)
+
+	exists, group := gr.IsUserInGroup(group_id, curr_user, true)
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	pagination := new(Pagination)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(pagination); err != nil {
+		ServerError(w, err)
+		return
+	}
 }
 
 func GetGroups(w http.ResponseWriter, r *http.Request) {
@@ -727,6 +777,7 @@ func routeMux() *mux.Router {
 	router.HandleFunc("/signup", Register).Methods("POST")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
 	router.HandleFunc("/group/{group_id}", GetSingleGroup).Methods("GET")
+	router.HandleFunc("/group/{group_id}/messages", GetGroupMessages).Methods("GET")
 	router.HandleFunc("/groups", GetGroups).Methods("GET")
 	router.HandleFunc("/ws/{group_id}", WebsocketHandler).Methods("GET")
 	return router
