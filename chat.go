@@ -254,6 +254,29 @@ func NewGroupClient(db *mgo.Session) *GroupDataClient {
 	return g
 }
 
+func (g *GroupDataClient) UpdateGroupName(id bson.ObjectId, name string) error {
+	c := g.db.DB(g.dbName).C(g.collection)
+	colQuery := bson.M{"_id": id}
+	change := bson.M{"$set": bson.M{"name": name}}
+	err := c.Update(colQuery, change)
+	return err
+}
+
+func (g *GroupDataClient) UpdateGroupMembers(id bson.ObjectId, members []string, remove string) error {
+	users, err := g.CreateMembersArray(members)
+	if err != nil {
+		return err
+	}
+	c := g.db.DB(g.dbName).C(g.collection)
+	colQuery := bson.M{"_id": id}
+	change := bson.M{"$addToSet": bson.M{"members": bson.M{"$each": users}}}
+	if remove == "true" {
+		change = bson.M{"$pullAll": bson.M{"members": users}}
+	}
+	err2 := c.Update(colQuery, change)
+	return err2
+}
+
 func (g *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User, full bool) (bool, *Group) {
 	group, err := g.FindGroupById(id, full)
 	if err != nil {
@@ -408,6 +431,71 @@ func (u *UserDataClient) NewUser(user *User) error {
 		return err
 	}
 	return nil
+}
+
+func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
+	curr_user, err := currentUser(w, r)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	group_id, err := GetIdFromPath(r, "group_id")
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	gr := NewGroupClient(db)
+
+	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	remove := r.URL.Query().Get("remove")
+	gp := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(gp); err != nil {
+		ServerError(w, err)
+		return
+	}
+	if err := gr.UpdateGroupMembers(group_id, gp.Members, remove); err != nil {
+		ServerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
+	curr_user, err := currentUser(w, r)
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	group_id, err := GetIdFromPath(r, "group_id")
+	if err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	gr := NewGroupClient(db)
+
+	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
+	if !exists {
+		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	gp := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(gp); err != nil {
+		ServerError(w, err)
+		return
+	}
+	if err := gr.UpdateGroupName(group_id, gp.Name); err != nil {
+		ServerError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
@@ -794,6 +882,8 @@ func routeMux() *mux.Router {
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
 	router.HandleFunc("/group/{group_id}", GetSingleGroup).Methods("GET")
 	router.HandleFunc("/group/{group_id}/messages", GetGroupMessages).Methods("GET")
+	router.HandleFunc("/group/{group_id}/name", UpdateGroupName).Methods("PUT")
+	router.HandleFunc("/group/{group_id}/members", UpdateGroupMembers).Methods("PUT")
 	router.HandleFunc("/groups", GetGroups).Methods("GET")
 	router.HandleFunc("/ws/{group_id}", WebsocketHandler).Methods("GET")
 	return router
