@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,8 +85,8 @@ type GroupPost struct {
 }
 
 type Pagination struct {
-	Limit  int `json:"limit"`
-	Offset int `json:"offset"`
+	Limit  string `json:"limit"`
+	Offset string `json:"offset"`
 }
 
 type Message struct {
@@ -305,10 +306,19 @@ func (g *GroupDataClient) FindGroupById(id bson.ObjectId, full bool) (*Group, er
 	return group, err2
 }
 
+func (g *GroupDataClient) GetPaginatedMessagesForGroup(id bson.ObjectId, pag *Pagination) (*[]RealTimeMessage, error) {
+	l, _ := strconv.Atoi(pag.Limit)
+	o, _ := strconv.Atoi(pag.Offset)
+	messages := make([]RealTimeMessage, 0)
+	c := g.db.DB(g.dbName).C("messages")
+	err := c.Find(bson.M{"group": id.Hex()}).Limit(l).Skip(o).Sort("-time").All(&messages)
+	return &messages, err
+}
+
 func (g *GroupDataClient) GetAllMessagesForGroup(gid bson.ObjectId) (*[]RealTimeMessage, error) {
 	messages := make([]RealTimeMessage, 0)
 	c := g.db.DB(g.dbName).C("messages")
-	err := c.Find(bson.M{"group": gid.Hex()}).Sort("-time").All(&messages)
+	err := c.Find(bson.M{"group": gid.Hex()}).Limit(20).Skip(0).Sort("-time").All(&messages)
 	return &messages, err
 }
 
@@ -419,12 +429,18 @@ func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	pagination := new(Pagination)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(pagination); err != nil {
+	pagination := &Pagination{
+		Limit:  r.URL.Query().Get("limit"),
+		Offset: r.URL.Query().Get("offset"),
+	}
+	messages, err := gr.GetPaginatedMessagesForGroup(group_id, pagination)
+	if err != nil {
 		ServerError(w, err)
 		return
 	}
+	mj, _ := json.Marshal(messages)
+	w.WriteHeader(http.StatusOK)
+	w.Write(mj)
 }
 
 func GetGroups(w http.ResponseWriter, r *http.Request) {
