@@ -436,19 +436,17 @@ func (u *UserDataClient) NewUser(user *User) error {
 func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	group_id, err := GetIdFromPath(r, "group_id")
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-
-	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
-	if !exists {
+	if exists, _ := gr.IsUserInGroup(group_id, curr_user, true); !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -469,19 +467,17 @@ func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
 func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	group_id, err := GetIdFromPath(r, "group_id")
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-
-	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
-	if !exists {
+	if exists, _ := gr.IsUserInGroup(group_id, curr_user, true); !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -501,7 +497,7 @@ func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
 func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	group_id, err := GetIdFromPath(r, "group_id")
@@ -511,9 +507,7 @@ func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-
-	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
-	if !exists {
+	if exists, _ := gr.IsUserInGroup(group_id, curr_user, true); !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -522,47 +516,54 @@ func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 		Offset: r.URL.Query().Get("offset"),
 	}
 	messages, err := gr.GetPaginatedMessagesForGroup(group_id, pagination)
-	if err != nil {
+	switch {
+	case err == mgo.ErrCursor:
+		w.WriteHeader(http.StatusBadRequest)
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err != nil:
 		ServerError(w, err)
-		return
+	default:
+		mj, _ := json.Marshal(messages)
+		w.WriteHeader(http.StatusOK)
+		w.Write(mj)
 	}
-	mj, _ := json.Marshal(messages)
-	w.WriteHeader(http.StatusOK)
-	w.Write(mj)
 }
 
 func GetGroups(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
 	groups, err := gr.GetGroupsForUser(curr_user)
-	if err != nil {
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err != nil:
 		ServerError(w, err)
-		return
+	default:
+		gj, _ := json.Marshal(groups)
+		w.WriteHeader(http.StatusOK)
+		w.Write(gj)
 	}
-	gj, _ := json.Marshal(groups)
-	w.WriteHeader(http.StatusOK)
-	w.Write(gj)
 }
 
 func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	group_id, err := GetIdFromPath(r, "group_id")
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-
 	exists, group := gr.IsUserInGroup(group_id, curr_user, true)
 	if !exists {
 		w.WriteHeader(http.StatusUnauthorized)
@@ -576,7 +577,7 @@ func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
 func CreateGroup(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	group_post := new(GroupPost)
@@ -655,7 +656,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
-		ServerError(w, err)
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	groupId, err := GetIdFromPath(r, "group_id")
