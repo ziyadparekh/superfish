@@ -414,7 +414,7 @@ func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
 
-	exists, group := gr.IsUserInGroup(group_id, curr_user, true)
+	exists, _ := gr.IsUserInGroup(group_id, curr_user, true)
 	if !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
