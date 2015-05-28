@@ -37,6 +37,10 @@ var ErrUnauthorizedAccess = errors.New("Unauthorized access")
 var Upgrader *websocket.Upgrader
 var ActiveGroups = make(map[string]*RealTimeGroup)
 
+var ChatBotID = "555f47ce09dce15f73000001"
+var ChatBotWs *websocket.Conn
+var ChatBot *RealTimeUser
+
 type User struct {
 	Id       bson.ObjectId `json:"id" bson:"_id"`
 	Username string        `json:"username" bson:"username"`
@@ -79,6 +83,11 @@ type RealTimeMessage struct {
 	Group   string    `json:"group"`
 }
 
+type MessagePost struct {
+	GroupId string `json:"groupId"`
+	Content string `json:"content"`
+}
+
 type GroupPost struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
@@ -87,12 +96,6 @@ type GroupPost struct {
 type Pagination struct {
 	Limit  string `json:"limit"`
 	Offset string `json:"offset"`
-}
-
-type Message struct {
-	Content string    `json:"content" bson:content`
-	Action  int       `json:"action" bson:action`
-	Time    time.Time `json:"time" bson:"time"`
 }
 
 type Base struct {
@@ -136,7 +139,7 @@ loop:
 					json.Unmarshal(m, msg)
 					if msg.Sender != user.User.Username {
 						select {
-						case user.SendQueue <- []byte(msg.Content):
+						case user.SendQueue <- PrepareMessage(msg):
 						default:
 							close(user.SendQueue)
 							delete(rt_group.Users, user)
@@ -152,7 +155,7 @@ loop:
 	}
 }
 
-func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage, u *RealTimeUser) {
+func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage) {
 	if len(rt_group.Users) > 0 {
 		rt_group.Broadcast <- PrepareMessage(message)
 		if err := rt_group.DataClient.AddMessageToDatabase(message); err != nil {
@@ -222,10 +225,15 @@ func (rt_user *RealTimeUser) Listen() {
 }
 
 func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
+	msg_post := new(MessagePost)
+	if err := json.Unmarshal(message, msg_post); err != nil {
+		log.Println(err)
+		return
+	}
 	msg := &RealTimeMessage{
-		Content: string(message[:]),
+		Content: msg_post.Content,
 		Sender:  rt_user.User.Username,
-		Group:   rt_user.GroupId,
+		Group:   msg_post.GroupId, //parse room id from message
 		Type:    "Text",
 		Time:    time.Now(),
 	}
@@ -234,8 +242,8 @@ func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
 	}
 	now := time.Now()
 	rt_user.LastActivity = now
-	room := ActiveGroups[rt_user.GroupId]
-	room.Announce(msg, rt_user)
+	room := ActiveGroups[msg.Group]
+	room.Announce(msg)
 }
 
 func PrepareMessage(content interface{}) []byte {
@@ -641,8 +649,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case err == ErrClientExists:
 		log.Println(err)
-		w.Header().Set("success", "false")
-		w.Header().Set("code", "20")
+		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(err.Error()))
 	case err != nil:
 		ServerError(w, err)
@@ -651,6 +658,42 @@ func Register(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write(uj)
 	}
+}
+
+func ChatbotHandler(w http.ResponseWriter, r *http.Request) {
+	userId, err := GetIdFromPath(r, "user_id")
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	db := GetMongoSession(r)
+	u := NewUserData(db)
+	user, err := u.GetById(userId.Hex())
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err != nil:
+		ServerError(w, err)
+	case !IsUserChatBot(user):
+		w.WriteHeader(http.StatusUnauthorized)
+	default:
+		ChatBotWs, err = Upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			ServerError(w, err)
+		}
+		ChatBot = &RealTimeUser{
+			User:         user,
+			Ws:           ChatBotWs,
+			SendQueue:    make(chan []byte),
+			LastActivity: time.Now(),
+		}
+		go ChatBot.Talk()
+		ChatBot.Listen()
+	}
+}
+
+func IsUserChatBot(u *User) bool {
+	return u.Id.Hex() == ChatBotID
 }
 
 func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
@@ -671,18 +714,15 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-
 	ws, err := Upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		ServerError(w, err)
 		return
 	}
-
 	rt_group, exists := ActiveGroups[groupId.Hex()]
 	if !exists {
 		rt_group = InitializeRTGroup(group, gr)
 	}
-
 	rt_user := &RealTimeUser{
 		User:         curr_user,
 		Ws:           ws,
@@ -690,11 +730,17 @@ func WebsocketHandler(w http.ResponseWriter, r *http.Request) {
 		GroupId:      group.Id.Hex(),
 		LastActivity: time.Now(),
 	}
-
 	rt_group.Register <- rt_user
-
+	if ChatBot != nil {
+		rt_group.Register <- RegisterChatBotInRoom(group.Id)
+	}
 	go rt_user.Talk()
 	rt_user.Listen()
+}
+
+func RegisterChatBotInRoom(groupId bson.ObjectId) *RealTimeUser {
+	ChatBot.GroupId = groupId.Hex()
+	return ChatBot
 }
 
 func InitializeRTGroup(g *Group, gr *GroupDataClient) *RealTimeGroup {
@@ -726,7 +772,7 @@ func IsItemInArray(members *[]User, name string) bool {
 
 func GetIdFromPath(r *http.Request, param string) (bson.ObjectId, error) {
 	err := errors.New("Could not parse group id")
-	urlParam := mux.Vars(r)["group_id"]
+	urlParam := mux.Vars(r)[param]
 	if urlParam == "" || !bson.IsObjectIdHex(urlParam) {
 		return "", err
 	}
@@ -781,8 +827,6 @@ func ParseIdFromString(stringID string) (bson.ObjectId, error) {
 //ServerError handles server errors writing a response to the client and logging the error.
 func ServerError(w http.ResponseWriter, err error) {
 	log.Println(err)
-	w.Header().Set("success", "false")
-	w.Header().Set("code", "50")
 	w.WriteHeader(http.StatusInternalServerError)
 }
 
@@ -886,6 +930,7 @@ func routeMux() *mux.Router {
 	router.HandleFunc("/group/{group_id}/name", UpdateGroupName).Methods("PUT")
 	router.HandleFunc("/group/{group_id}/members", UpdateGroupMembers).Methods("PUT")
 	router.HandleFunc("/groups", GetGroups).Methods("GET")
+	router.HandleFunc("/ws/chatbot/{user_id}", ChatbotHandler).Methods("GET")
 	router.HandleFunc("/ws/{group_id}", WebsocketHandler).Methods("GET")
 	return router
 }
