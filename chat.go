@@ -41,6 +41,11 @@ var ChatBotID = "555f47ce09dce15f73000001"
 var ChatBotWs *websocket.Conn
 var ChatBot *RealTimeUser
 
+type ApiResponse struct {
+	Status   int         `json:"status"`
+	Response interface{} `json:"response"`
+}
+
 type User struct {
 	Id       bson.ObjectId `json:"id" bson:"_id"`
 	Username string        `json:"username" bson:"username"`
@@ -553,10 +558,18 @@ func GetGroups(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		gj, _ := json.Marshal(groups)
-		w.WriteHeader(http.StatusOK)
-		w.Write(gj)
+		WriteResponse(w, groups)
 	}
+}
+
+func WriteResponse(w http.ResponseWriter, content interface{}) {
+	response := new(ApiResponse)
+	response.Response = content
+	response.Status = http.StatusOK
+	rj, _ := json.Marshal(response)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(rj)
 }
 
 func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
