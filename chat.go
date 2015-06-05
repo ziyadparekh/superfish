@@ -63,7 +63,7 @@ type RealTimeUser struct {
 }
 
 type Group struct {
-	Id       bson.ObjectId     `json:"id" bson:"_id"`
+	Id       bson.ObjectId     `json:"groupId" bson:"_id"`
 	Name     string            `json:"name" bson:"name"`
 	Activity time.Time         `json:"activity" bson:"activity"`
 	Members  []User            `json:"members" bson:"members"`
@@ -142,13 +142,11 @@ loop:
 				for user := range rt_group.Users {
 					msg := new(RealTimeMessage)
 					json.Unmarshal(m, msg)
-					if msg.Sender != user.User.Username {
-						select {
-						case user.SendQueue <- PrepareMessage(msg):
-						default:
-							close(user.SendQueue)
-							delete(rt_group.Users, user)
-						}
+					select {
+					case user.SendQueue <- PrepareMessage(msg):
+					default:
+						close(user.SendQueue)
+						delete(rt_group.Users, user)
 					}
 				}
 			} else {
@@ -537,9 +535,7 @@ func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		mj, _ := json.Marshal(messages)
-		w.WriteHeader(http.StatusOK)
-		w.Write(mj)
+		WriteResponse(w, messages)
 	}
 }
 
