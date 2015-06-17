@@ -37,7 +37,7 @@ var ErrUnauthorizedAccess = errors.New("Unauthorized access")
 var Upgrader *websocket.Upgrader
 var ActiveGroups = make(map[string]*RealTimeGroup)
 
-var ChatBotID = "555e92a93c5d6387f9000004"
+var ChatBotID = "557f9de43c5d63a527000001"
 var ChatBotWs *websocket.Conn
 var ChatBot *RealTimeUser
 
@@ -65,6 +65,7 @@ type RealTimeUser struct {
 type Group struct {
 	Id       bson.ObjectId     `json:"groupId" bson:"_id"`
 	Name     string            `json:"name" bson:"name"`
+	Admin    string            `json:"admin" bson:"admin"`
 	Activity time.Time         `json:"activity" bson:"activity"`
 	Members  []User            `json:"members" bson:"members"`
 	Messages []RealTimeMessage `json:"messages" bson:"messages"`
@@ -96,11 +97,17 @@ type MessagePost struct {
 type GroupPost struct {
 	Name    string   `json:"name"`
 	Members []string `json:"members"`
+	Token   string   `json:"token"`
 }
 
 type ContactsPost struct {
 	Contacts []string `json:"contacts"`
 	Token    string   `json:"token"`
+}
+
+type Contacts struct {
+	UserId   bson.ObjectId `json:"user_id" bson:"user_id"`
+	Contacts []User        `json:"contacts" bson:"contacts"`
 }
 
 type Pagination struct {
@@ -309,6 +316,18 @@ func (g *GroupDataClient) IsUserInGroup(id bson.ObjectId, u *User, full bool) (b
 	return false, nil
 }
 
+func (g *GroupDataClient) IsUserGroupAdmin(id bson.ObjectId, u *User, full bool) (bool, *Group) {
+	group, err := g.FindGroupById(id, full)
+	if err != nil {
+		log.Println(err)
+		return false, nil
+	}
+	if group.Admin == u.Username {
+		return true, group
+	}
+	return false, nil
+}
+
 func (g *GroupDataClient) GetGroupsForUser(user *User) (*[]Group, error) {
 	username := [1]*User{user}
 	groups := make([]Group, 0)
@@ -373,6 +392,7 @@ func (g *GroupDataClient) FormatGroupContent(data *GroupPost, curr_user *User) (
 	group.Activity = time.Now()
 	group.Id = bson.NewObjectId()
 	group.Messages = g.NewMessagesList()
+	group.Admin = curr_user.Username
 	if exists {
 		group.Members = *users
 	} else {
@@ -410,10 +430,30 @@ func NewContactsClient(db *mgo.Session) *ContactsDataClient {
 
 func (c *ContactsDataClient) FilterUsersContacts(contacts []string, curr_user *User) (*[]User, error) {
 	users := make([]User, 1)
-	collection := c.db.DB(c.dbName).C("users")
-	query := bson.M{"number": bson.M{"$in": contacts}}
-	err := collection.Find(query).All(&users)
-	return &users, err
+	uc := c.db.DB(c.dbName).C("users")
+	cc := c.db.DB(c.dbName).C(c.collection)
+
+	query1 := bson.M{"number": bson.M{"$in": contacts}}
+	uc.Find(query1).All(&users)
+
+	colQuery := bson.M{"user_id": curr_user.Id}
+	query2 := bson.M{"$addToSet": bson.M{"contacts": bson.M{"$each": users}}}
+	if err2 := cc.Update(colQuery, query2); err2 != mgo.ErrNotFound {
+		return &users, err2
+	}
+	cont := new(Contacts)
+	cont.UserId = curr_user.Id
+	cont.Contacts = users
+	err3 := cc.Insert(cont)
+
+	return &users, err3
+}
+
+func (c *ContactsDataClient) FetchUserContacts(curr_user *User) (*Contacts, error) {
+	contacts := new(Contacts)
+	cc := c.db.DB(c.dbName).C(c.collection)
+	err := cc.Find(bson.M{"user_id": curr_user.Id}).One(contacts)
+	return contacts, err
 }
 
 func NewUserData(db *mgo.Session) *UserDataClient {
@@ -483,7 +523,7 @@ func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-	if exists, _ := gr.IsUserInGroup(group_id, curr_user, true); !exists {
+	if exists, _ := gr.IsUserGroupAdmin(group_id, curr_user, true); !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -514,7 +554,7 @@ func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
 	}
 	db := GetMongoSession(r)
 	gr := NewGroupClient(db)
-	if exists, _ := gr.IsUserInGroup(group_id, curr_user, true); !exists {
+	if exists, _ := gr.IsUserGroupAdmin(group_id, curr_user, true); !exists {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -609,7 +649,7 @@ func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
 	gr := NewGroupClient(db)
 	exists, group := gr.IsUserInGroup(group_id, curr_user, true)
 	if !exists {
-		w.WriteHeader(http.StatusUnauthorized)
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	gj, _ := json.Marshal(group)
@@ -617,16 +657,35 @@ func GetSingleGroup(w http.ResponseWriter, r *http.Request) {
 	w.Write(gj)
 }
 
-func CreateGroup(w http.ResponseWriter, r *http.Request) {
+func FetchContacts(w http.ResponseWriter, r *http.Request) {
 	curr_user, err := currentUser(w, r)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	db := GetMongoSession(r)
+	cc := NewContactsClient(db)
+	contacts, err := cc.FetchUserContacts(curr_user)
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err != nil:
+		ServerError(w, err)
+	default:
+		WriteResponse(w, contacts)
+	}
+}
+
+func CreateGroup(w http.ResponseWriter, r *http.Request) {
 	group_post := new(GroupPost)
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(group_post); err != nil {
 		ServerError(w, err)
+		return
+	}
+	curr_user, err := currentUserByPost(r, group_post.Token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
 	if !ValidateName(group_post.Name) {
@@ -660,7 +719,6 @@ func FilterContacts(w http.ResponseWriter, r *http.Request) {
 	db := GetMongoSession(r)
 	c := NewContactsClient(db)
 	users, err := c.FilterUsersContacts(contacts_post.Contacts, curr_user)
-	log.Println(curr_user)
 	switch {
 	case err == mgo.ErrNotFound:
 		w.WriteHeader(http.StatusNotFound)
@@ -1004,6 +1062,7 @@ func routeMux() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/signup", Register).Methods("POST")
 	router.HandleFunc("/contacts", FilterContacts).Methods("POST")
+	router.HandleFunc("/contacts", FetchContacts).Methods("GET")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
 	router.HandleFunc("/group/{group_id}", GetSingleGroup).Methods("GET")
 	router.HandleFunc("/group/{group_id}/messages", GetGroupMessages).Methods("GET")
