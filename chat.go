@@ -82,16 +82,24 @@ type RealTimeGroup struct {
 }
 
 type RealTimeMessage struct {
-	Sender  string    `json:"sender"`
-	Content string    `json:"content"`
-	Time    time.Time `json:"time"`
-	Type    string    `json:"type"`
-	Group   string    `json:"group"`
+	Id      bson.ObjectId `json:"groupId" bson:"_id"`
+	Sender  string        `json:"sender" bson:"sender"`
+	Content string        `json:"content" bson:"content"`
+	Time    time.Time     `json:"time" bson:"time"`
+	Type    string        `json:"type" bson:"type"`
+	Group   string        `json:"group" bson:"group"`
+	Read    []string      `json:"read" bson:"read"`
 }
 
 type MessagePost struct {
 	GroupId string `json:"groupId"`
 	Content string `json:"content"`
+	Type    string `json:"type"`
+}
+
+type ReadPost struct {
+	GroupId string `json:"groupId"`
+	Reader  string `json:"reader"`
 }
 
 type GroupPost struct {
@@ -186,6 +194,19 @@ func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage) {
 	}
 }
 
+func (g *GroupDataClient) UpdateReadMessagesForUser(groupId, username string) error {
+	c := g.db.DB(g.dbName).C("messages")
+	messagesByGroupQuery := bson.M{"group": groupId}
+	messagesNotReadByUserQuery := bson.M{"read": bson.M{"$nin": [1]string{username}}}
+	combinedQuery := bson.M{"$and": [2]bson.M{messagesByGroupQuery, messagesNotReadByUserQuery}}
+	updateQuery := bson.M{"$addToSet": bson.M{"read": username}}
+	//updated info is first param
+	if _, err := c.UpdateAll(combinedQuery, updateQuery); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (g *GroupDataClient) AddMessageToDatabase(message *RealTimeMessage) error {
 	C := g.db.DB(g.dbName).C("messages")
 	err := C.Insert(message)
@@ -249,20 +270,32 @@ func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
 		log.Println(err)
 		return
 	}
-	msg := &RealTimeMessage{
-		Content: msg_post.Content,
-		Sender:  rt_user.User.Username,
-		Group:   msg_post.GroupId, //parse room id from message
-		Type:    "Text",
-		Time:    time.Now(),
-	}
-	if len(msg.Content) == 0 {
+	room := ActiveGroups[msg_post.GroupId]
+	switch msg_post.Type {
+	case "Text":
+		msg := &RealTimeMessage{
+			Id:      bson.NewObjectId(),
+			Content: msg_post.Content,
+			Sender:  rt_user.User.Username,
+			Group:   msg_post.GroupId, //parse room id from message
+			Type:    "Text",
+			Time:    time.Now(),
+			Read:    []string{rt_user.User.Username},
+		}
+		if len(msg.Content) == 0 {
+			return
+		}
+		now := time.Now()
+		rt_user.LastActivity = now
+		room.Announce(msg)
+	case "Read":
+		err := room.DataClient.UpdateReadMessagesForUser(msg_post.GroupId, rt_user.User.Username)
+		if err != nil {
+			return
+		}
+	default:
 		return
 	}
-	now := time.Now()
-	rt_user.LastActivity = now
-	room := ActiveGroups[msg.Group]
-	room.Announce(msg)
 }
 
 func PrepareMessage(content interface{}) []byte {
@@ -699,9 +732,7 @@ func CreateGroup(w http.ResponseWriter, r *http.Request) {
 	if err := g.NewGroup(group); err != nil {
 		ServerError(w, err)
 	}
-	gj, _ := json.Marshal(group)
-	w.WriteHeader(http.StatusOK)
-	w.Write(gj)
+	WriteResponse(w, group)
 }
 
 func FilterContacts(w http.ResponseWriter, r *http.Request) {
