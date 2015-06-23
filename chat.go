@@ -453,6 +453,16 @@ func (g *GroupDataClient) NewGroup(group *Group) error {
 	return err
 }
 
+func (g *GroupDataClient) DoesGroupExist(group *Group, curr_user *User) (*Group, error) {
+	c := g.db.DB(g.dbName).C(g.collection)
+	gr := new(Group)
+	membersQuery := bson.M{"members": bson.M{"$all": group.Members}}
+	adminQuery := bson.M{"admin": curr_user.Username}
+	combinedQuery := bson.M{"$and": [2]bson.M{membersQuery, adminQuery}}
+	err := c.Find(combinedQuery).One(gr)
+	return gr, err
+}
+
 func NewContactsClient(db *mgo.Session) *ContactsDataClient {
 	c := new(ContactsDataClient)
 	c.db = db
@@ -729,10 +739,21 @@ func CreateGroup(w http.ResponseWriter, r *http.Request) {
 	db := GetMongoSession(r)
 	g := NewGroupClient(db)
 	group, err := g.FormatGroupContent(group_post, curr_user)
-	if err := g.NewGroup(group); err != nil {
+	gr, err := g.DoesGroupExist(group, curr_user)
+	switch {
+	case err == mgo.ErrNotFound:
+		if err := g.NewGroup(group); err != nil {
+			ServerError(w, err)
+		}
+		WriteResponse(w, group)
+	case err == nil:
+		WriteResponse(w, gr)
+	case err != nil:
 		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
 	}
-	WriteResponse(w, group)
 }
 
 func FilterContacts(w http.ResponseWriter, r *http.Request) {
