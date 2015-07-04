@@ -322,17 +322,14 @@ func (g *GroupDataClient) UpdateGroupName(id bson.ObjectId, name string) error {
 	return err
 }
 
-func (g *GroupDataClient) UpdateGroupMembers(id bson.ObjectId, members []string, remove string) error {
+func (g *GroupDataClient) UpdateGroupMembers(id bson.ObjectId, members []string) error {
 	users, err := g.CreateMembersArray(members)
 	if err != nil {
 		return err
 	}
 	c := g.db.DB(g.dbName).C(g.collection)
 	colQuery := bson.M{"_id": id}
-	change := bson.M{"$addToSet": bson.M{"members": bson.M{"$each": users}}}
-	if remove == "true" {
-		change = bson.M{"$pullAll": bson.M{"members": users}}
-	}
+	change := bson.M{"$set": bson.M{"members": users}}
 	err2 := c.Update(colQuery, change)
 	return err2
 }
@@ -531,6 +528,18 @@ func (u *UserDataClient) CreateNewUser(user *User) error {
 	return err
 }
 
+func (u *UserDataClient) LoginUser(user *User) (*User, error) {
+	us, err := u.GetByUsername(user.Username)
+	if err != nil {
+		return nil, err
+	}
+	p_err := bcrypt.CompareHashAndPassword([]byte(us.Password), []byte(user.Password))
+	if p_err != nil {
+		return nil, ErrPasswordInvalid
+	}
+	return us, nil
+}
+
 func (u *UserDataClient) ClientExists(username string) bool {
 	//TODO:: also validate phone numbers
 	_, err := u.GetByUsername(username)
@@ -554,7 +563,13 @@ func (u *UserDataClient) NewUser(user *User) error {
 }
 
 func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
-	curr_user, err := currentUser(w, r)
+	group_post := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(group_post); err != nil {
+		ServerError(w, err)
+		return
+	}
+	curr_user, err := currentUserByPost(r, group_post.Token)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -570,22 +585,31 @@ func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	remove := r.URL.Query().Get("remove")
-	gp := new(GroupPost)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(gp); err != nil {
+	if err := gr.UpdateGroupMembers(group_id, group_post.Members); err != nil {
 		ServerError(w, err)
 		return
 	}
-	if err := gr.UpdateGroupMembers(group_id, gp.Members, remove); err != nil {
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err == nil:
+		WriteResponse(w, "success")
+	case err != nil:
 		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
 }
 
 func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
-	curr_user, err := currentUser(w, r)
+	group_post := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(group_post); err != nil {
+		ServerError(w, err)
+		return
+	}
+	curr_user, err := currentUserByPost(r, group_post.Token)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -601,17 +625,58 @@ func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	gp := new(GroupPost)
+	if err := gr.UpdateGroupName(group_id, group_post.Name); err != nil {
+		ServerError(w, err)
+		return
+	}
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err == nil:
+		WriteResponse(w, "success")
+	case err != nil:
+		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+}
+
+func CreateGroup(w http.ResponseWriter, r *http.Request) {
+	group_post := new(GroupPost)
 	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(gp); err != nil {
+	if err := dec.Decode(group_post); err != nil {
 		ServerError(w, err)
 		return
 	}
-	if err := gr.UpdateGroupName(group_id, gp.Name); err != nil {
-		ServerError(w, err)
+	curr_user, err := currentUserByPost(r, group_post.Token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	if !ValidateName(group_post.Name) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(ErrGroupNameInvalid.Error()))
+		return
+	}
+	db := GetMongoSession(r)
+	g := NewGroupClient(db)
+	group, err := g.FormatGroupContent(group_post, curr_user)
+	gr, err := g.DoesGroupExist(group, curr_user)
+	switch {
+	case err == mgo.ErrNotFound:
+		if err := g.NewGroup(group); err != nil {
+			ServerError(w, err)
+		}
+		WriteResponse(w, group)
+	case err == nil:
+		WriteResponse(w, gr)
+	case err != nil:
+		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 }
 
 func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
@@ -719,43 +784,6 @@ func FetchContacts(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func CreateGroup(w http.ResponseWriter, r *http.Request) {
-	group_post := new(GroupPost)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(group_post); err != nil {
-		ServerError(w, err)
-		return
-	}
-	curr_user, err := currentUserByPost(r, group_post.Token)
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	if !ValidateName(group_post.Name) {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(ErrGroupNameInvalid.Error()))
-		return
-	}
-	db := GetMongoSession(r)
-	g := NewGroupClient(db)
-	group, err := g.FormatGroupContent(group_post, curr_user)
-	gr, err := g.DoesGroupExist(group, curr_user)
-	switch {
-	case err == mgo.ErrNotFound:
-		if err := g.NewGroup(group); err != nil {
-			ServerError(w, err)
-		}
-		WriteResponse(w, group)
-	case err == nil:
-		WriteResponse(w, gr)
-	case err != nil:
-		ServerError(w, err)
-	default:
-		w.WriteHeader(http.StatusNotFound)
-		return
-	}
-}
-
 func FilterContacts(w http.ResponseWriter, r *http.Request) {
 	contacts_post := new(ContactsPost)
 	dec := json.NewDecoder(r.Body)
@@ -817,6 +845,30 @@ func currentUser(w http.ResponseWriter, r *http.Request) (*User, error) {
 	return nil, ErrUnauthorizedAccess
 }
 
+func Login(w http.ResponseWriter, r *http.Request) {
+	user := new(User)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(user); err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	u := NewUserData(db)
+	if u.ClientExists(user.Username) {
+		user, err := u.LoginUser(user)
+		switch {
+		case err == ErrPasswordInvalid:
+			w.WriteHeader(http.StatusBadRequest)
+		case err != nil:
+			ServerError(w, err)
+		default:
+			WriteResponse(w, user)
+		}
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
 func Register(w http.ResponseWriter, r *http.Request) {
 	user := new(User)
 	dec := json.NewDecoder(r.Body)
@@ -843,9 +895,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		uj, _ := json.Marshal(user)
-		w.WriteHeader(http.StatusOK)
-		w.Write(uj)
+		WriteResponse(w, user)
 	}
 }
 
@@ -1113,6 +1163,7 @@ func middlewareStruct() *interpose.Middleware {
 func routeMux() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/signup", Register).Methods("POST")
+	router.HandleFunc("/login", Login).Methods("POST")
 	router.HandleFunc("/contacts", FilterContacts).Methods("POST")
 	router.HandleFunc("/contacts", FetchContacts).Methods("GET")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
