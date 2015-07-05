@@ -41,6 +41,8 @@ var ChatBotID = "557f9de43c5d63a527000001"
 var ChatBotWs *websocket.Conn
 var ChatBot *RealTimeUser
 
+var avatarBase = "https://sigil.cupcake.io"
+
 type ApiResponse struct {
 	Status   int         `json:"status"`
 	Response interface{} `json:"response"`
@@ -52,6 +54,7 @@ type User struct {
 	Number   string        `json:"number" bson:"number"`
 	Token    string        `json:"token" bson:"token"`
 	Password string        `json:"password" bson:"password"`
+	Avatar   string        `json:"avatar" bson:"avatar"`
 }
 
 type RealTimeUser struct {
@@ -84,6 +87,7 @@ type RealTimeGroup struct {
 type RealTimeMessage struct {
 	Id      bson.ObjectId `json:"groupId" bson:"_id"`
 	Sender  string        `json:"sender" bson:"sender"`
+	Avatar  string        `json:"avatar" bson:"avatar"`
 	Content string        `json:"content" bson:"content"`
 	Time    time.Time     `json:"time" bson:"time"`
 	Type    string        `json:"type" bson:"type"`
@@ -277,6 +281,7 @@ func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
 			Id:      bson.NewObjectId(),
 			Content: msg_post.Content,
 			Sender:  rt_user.User.Username,
+			Avatar:  rt_user.User.Avatar,
 			Group:   msg_post.GroupId, //parse room id from message
 			Type:    "Text",
 			Time:    time.Now(),
@@ -555,6 +560,7 @@ func (u *UserDataClient) NewUser(user *User) error {
 		return ErrClientExists
 	}
 	user.Password = Encrypt(user.Password)
+	user.Avatar = avatarBase + "/" + user.Username
 	err := u.CreateNewUser(user)
 	if err != nil {
 		return err
@@ -780,7 +786,7 @@ func FetchContacts(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		WriteResponse(w, contacts)
+		WriteResponse(w, contacts.Contacts)
 	}
 }
 
