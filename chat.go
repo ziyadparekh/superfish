@@ -41,6 +41,8 @@ var ChatBotID = "557f9de43c5d63a527000001"
 var ChatBotWs *websocket.Conn
 var ChatBot *RealTimeUser
 
+var avatarBase = "https://sigil.cupcake.io"
+
 type ApiResponse struct {
 	Status   int         `json:"status"`
 	Response interface{} `json:"response"`
@@ -52,6 +54,7 @@ type User struct {
 	Number   string        `json:"number" bson:"number"`
 	Token    string        `json:"token" bson:"token"`
 	Password string        `json:"password" bson:"password"`
+	Avatar   string        `json:"avatar" bson:"avatar"`
 }
 
 type RealTimeUser struct {
@@ -82,16 +85,25 @@ type RealTimeGroup struct {
 }
 
 type RealTimeMessage struct {
-	Sender  string    `json:"sender"`
-	Content string    `json:"content"`
-	Time    time.Time `json:"time"`
-	Type    string    `json:"type"`
-	Group   string    `json:"group"`
+	Id      bson.ObjectId `json:"groupId" bson:"_id"`
+	Sender  string        `json:"sender" bson:"sender"`
+	Avatar  string        `json:"avatar" bson:"avatar"`
+	Content string        `json:"content" bson:"content"`
+	Time    time.Time     `json:"time" bson:"time"`
+	Type    string        `json:"type" bson:"type"`
+	Group   string        `json:"group" bson:"group"`
+	Read    []string      `json:"read" bson:"read"`
 }
 
 type MessagePost struct {
 	GroupId string `json:"groupId"`
 	Content string `json:"content"`
+	Type    string `json:"type"`
+}
+
+type ReadPost struct {
+	GroupId string `json:"groupId"`
+	Reader  string `json:"reader"`
 }
 
 type GroupPost struct {
@@ -186,6 +198,19 @@ func (rt_group *RealTimeGroup) Announce(message *RealTimeMessage) {
 	}
 }
 
+func (g *GroupDataClient) UpdateReadMessagesForUser(groupId, username string) error {
+	c := g.db.DB(g.dbName).C("messages")
+	messagesByGroupQuery := bson.M{"group": groupId}
+	messagesNotReadByUserQuery := bson.M{"read": bson.M{"$nin": [1]string{username}}}
+	combinedQuery := bson.M{"$and": [2]bson.M{messagesByGroupQuery, messagesNotReadByUserQuery}}
+	updateQuery := bson.M{"$addToSet": bson.M{"read": username}}
+	//updated info is first param
+	if _, err := c.UpdateAll(combinedQuery, updateQuery); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (g *GroupDataClient) AddMessageToDatabase(message *RealTimeMessage) error {
 	C := g.db.DB(g.dbName).C("messages")
 	err := C.Insert(message)
@@ -249,20 +274,33 @@ func (rt_user *RealTimeUser) ProcessMessage(message []byte) {
 		log.Println(err)
 		return
 	}
-	msg := &RealTimeMessage{
-		Content: msg_post.Content,
-		Sender:  rt_user.User.Username,
-		Group:   msg_post.GroupId, //parse room id from message
-		Type:    "Text",
-		Time:    time.Now(),
-	}
-	if len(msg.Content) == 0 {
+	room := ActiveGroups[msg_post.GroupId]
+	switch msg_post.Type {
+	case "Text":
+		msg := &RealTimeMessage{
+			Id:      bson.NewObjectId(),
+			Content: msg_post.Content,
+			Sender:  rt_user.User.Username,
+			Avatar:  rt_user.User.Avatar,
+			Group:   msg_post.GroupId, //parse room id from message
+			Type:    "Text",
+			Time:    time.Now(),
+			Read:    []string{rt_user.User.Username},
+		}
+		if len(msg.Content) == 0 {
+			return
+		}
+		now := time.Now()
+		rt_user.LastActivity = now
+		room.Announce(msg)
+	case "Read":
+		err := room.DataClient.UpdateReadMessagesForUser(msg_post.GroupId, rt_user.User.Username)
+		if err != nil {
+			return
+		}
+	default:
 		return
 	}
-	now := time.Now()
-	rt_user.LastActivity = now
-	room := ActiveGroups[msg.Group]
-	room.Announce(msg)
 }
 
 func PrepareMessage(content interface{}) []byte {
@@ -289,17 +327,14 @@ func (g *GroupDataClient) UpdateGroupName(id bson.ObjectId, name string) error {
 	return err
 }
 
-func (g *GroupDataClient) UpdateGroupMembers(id bson.ObjectId, members []string, remove string) error {
+func (g *GroupDataClient) UpdateGroupMembers(id bson.ObjectId, members []string) error {
 	users, err := g.CreateMembersArray(members)
 	if err != nil {
 		return err
 	}
 	c := g.db.DB(g.dbName).C(g.collection)
 	colQuery := bson.M{"_id": id}
-	change := bson.M{"$addToSet": bson.M{"members": bson.M{"$each": users}}}
-	if remove == "true" {
-		change = bson.M{"$pullAll": bson.M{"members": users}}
-	}
+	change := bson.M{"$set": bson.M{"members": users}}
 	err2 := c.Update(colQuery, change)
 	return err2
 }
@@ -420,6 +455,16 @@ func (g *GroupDataClient) NewGroup(group *Group) error {
 	return err
 }
 
+func (g *GroupDataClient) DoesGroupExist(group *Group, curr_user *User) (*Group, error) {
+	c := g.db.DB(g.dbName).C(g.collection)
+	gr := new(Group)
+	membersQuery := bson.M{"members": bson.M{"$all": group.Members}}
+	adminQuery := bson.M{"admin": curr_user.Username}
+	combinedQuery := bson.M{"$and": [2]bson.M{membersQuery, adminQuery}}
+	err := c.Find(combinedQuery).One(gr)
+	return gr, err
+}
+
 func NewContactsClient(db *mgo.Session) *ContactsDataClient {
 	c := new(ContactsDataClient)
 	c.db = db
@@ -488,6 +533,18 @@ func (u *UserDataClient) CreateNewUser(user *User) error {
 	return err
 }
 
+func (u *UserDataClient) LoginUser(user *User) (*User, error) {
+	us, err := u.GetByUsername(user.Username)
+	if err != nil {
+		return nil, err
+	}
+	p_err := bcrypt.CompareHashAndPassword([]byte(us.Password), []byte(user.Password))
+	if p_err != nil {
+		return nil, ErrPasswordInvalid
+	}
+	return us, nil
+}
+
 func (u *UserDataClient) ClientExists(username string) bool {
 	//TODO:: also validate phone numbers
 	_, err := u.GetByUsername(username)
@@ -503,6 +560,7 @@ func (u *UserDataClient) NewUser(user *User) error {
 		return ErrClientExists
 	}
 	user.Password = Encrypt(user.Password)
+	user.Avatar = avatarBase + "/" + user.Username
 	err := u.CreateNewUser(user)
 	if err != nil {
 		return err
@@ -511,7 +569,13 @@ func (u *UserDataClient) NewUser(user *User) error {
 }
 
 func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
-	curr_user, err := currentUser(w, r)
+	group_post := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(group_post); err != nil {
+		ServerError(w, err)
+		return
+	}
+	curr_user, err := currentUserByPost(r, group_post.Token)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -527,22 +591,31 @@ func UpdateGroupMembers(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	remove := r.URL.Query().Get("remove")
-	gp := new(GroupPost)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(gp); err != nil {
+	if err := gr.UpdateGroupMembers(group_id, group_post.Members); err != nil {
 		ServerError(w, err)
 		return
 	}
-	if err := gr.UpdateGroupMembers(group_id, gp.Members, remove); err != nil {
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err == nil:
+		WriteResponse(w, "success")
+	case err != nil:
 		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
 }
 
 func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
-	curr_user, err := currentUser(w, r)
+	group_post := new(GroupPost)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(group_post); err != nil {
+		ServerError(w, err)
+		return
+	}
+	curr_user, err := currentUserByPost(r, group_post.Token)
 	if err != nil {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -558,17 +631,58 @@ func UpdateGroupName(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	gp := new(GroupPost)
+	if err := gr.UpdateGroupName(group_id, group_post.Name); err != nil {
+		ServerError(w, err)
+		return
+	}
+	switch {
+	case err == mgo.ErrNotFound:
+		w.WriteHeader(http.StatusNotFound)
+	case err == nil:
+		WriteResponse(w, "success")
+	case err != nil:
+		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+}
+
+func CreateGroup(w http.ResponseWriter, r *http.Request) {
+	group_post := new(GroupPost)
 	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(gp); err != nil {
+	if err := dec.Decode(group_post); err != nil {
 		ServerError(w, err)
 		return
 	}
-	if err := gr.UpdateGroupName(group_id, gp.Name); err != nil {
-		ServerError(w, err)
+	curr_user, err := currentUserByPost(r, group_post.Token)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	w.WriteHeader(http.StatusOK)
+	if !ValidateName(group_post.Name) {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(ErrGroupNameInvalid.Error()))
+		return
+	}
+	db := GetMongoSession(r)
+	g := NewGroupClient(db)
+	group, err := g.FormatGroupContent(group_post, curr_user)
+	gr, err := g.DoesGroupExist(group, curr_user)
+	switch {
+	case err == mgo.ErrNotFound:
+		if err := g.NewGroup(group); err != nil {
+			ServerError(w, err)
+		}
+		WriteResponse(w, group)
+	case err == nil:
+		WriteResponse(w, gr)
+	case err != nil:
+		ServerError(w, err)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
 }
 
 func GetGroupMessages(w http.ResponseWriter, r *http.Request) {
@@ -672,36 +786,8 @@ func FetchContacts(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		WriteResponse(w, contacts)
+		WriteResponse(w, contacts.Contacts)
 	}
-}
-
-func CreateGroup(w http.ResponseWriter, r *http.Request) {
-	group_post := new(GroupPost)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(group_post); err != nil {
-		ServerError(w, err)
-		return
-	}
-	curr_user, err := currentUserByPost(r, group_post.Token)
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
-	if !ValidateName(group_post.Name) {
-		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(ErrGroupNameInvalid.Error()))
-		return
-	}
-	db := GetMongoSession(r)
-	g := NewGroupClient(db)
-	group, err := g.FormatGroupContent(group_post, curr_user)
-	if err := g.NewGroup(group); err != nil {
-		ServerError(w, err)
-	}
-	gj, _ := json.Marshal(group)
-	w.WriteHeader(http.StatusOK)
-	w.Write(gj)
 }
 
 func FilterContacts(w http.ResponseWriter, r *http.Request) {
@@ -765,6 +851,30 @@ func currentUser(w http.ResponseWriter, r *http.Request) (*User, error) {
 	return nil, ErrUnauthorizedAccess
 }
 
+func Login(w http.ResponseWriter, r *http.Request) {
+	user := new(User)
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(user); err != nil {
+		ServerError(w, err)
+		return
+	}
+	db := GetMongoSession(r)
+	u := NewUserData(db)
+	if u.ClientExists(user.Username) {
+		user, err := u.LoginUser(user)
+		switch {
+		case err == ErrPasswordInvalid:
+			w.WriteHeader(http.StatusBadRequest)
+		case err != nil:
+			ServerError(w, err)
+		default:
+			WriteResponse(w, user)
+		}
+	} else {
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
 func Register(w http.ResponseWriter, r *http.Request) {
 	user := new(User)
 	dec := json.NewDecoder(r.Body)
@@ -791,9 +901,7 @@ func Register(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		ServerError(w, err)
 	default:
-		uj, _ := json.Marshal(user)
-		w.WriteHeader(http.StatusOK)
-		w.Write(uj)
+		WriteResponse(w, user)
 	}
 }
 
@@ -1061,6 +1169,7 @@ func middlewareStruct() *interpose.Middleware {
 func routeMux() *mux.Router {
 	router := mux.NewRouter()
 	router.HandleFunc("/signup", Register).Methods("POST")
+	router.HandleFunc("/login", Login).Methods("POST")
 	router.HandleFunc("/contacts", FilterContacts).Methods("POST")
 	router.HandleFunc("/contacts", FetchContacts).Methods("GET")
 	router.HandleFunc("/group", CreateGroup).Methods("POST")
